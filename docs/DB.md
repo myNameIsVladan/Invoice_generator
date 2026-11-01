@@ -12,7 +12,7 @@ Postgres on Supabase. Product rules are in [PRD.md](./PRD.md). How the app uses 
 - Every table in `public` has Row Level Security enabled. Policies target `authenticated` and compare `(select auth.uid())` so the id is evaluated once per query.
 - Foreign keys are indexed.
 - A user id on a child row matches the parent through a composite foreign key, so a client or line cannot be attached across users.
-- `anon` has no grants on these tables. `authenticated` gets only the actions a policy allows. The Stripe webhook uses the secret key, which bypasses RLS.
+- `anon` has no grants on these tables. `authenticated` gets only the actions a policy allows, and on several tables only specific columns. The Stripe webhook uses the secret key as `service_role`, which bypasses RLS and has full table grants.
 
 Overdue is not a column. A list filters it with `status = 'not_paid' and due_date < current_date`.
 
@@ -141,7 +141,7 @@ Paid rows satisfy `paid_via` in (`stripe`, `manual`) and `paid_at` is set. Unpai
 | `line_tax` | `numeric(12,2)` | `round(line_subtotal * vat_rate / 100, 2)` |
 | `line_total` | `numeric(12,2)` | `line_subtotal + line_tax` |
 
-A before-insert/update trigger overwrites the three computed columns. The client cannot store a mismatched line total.
+`private.set_line_amounts` runs before insert and update and overwrites the three computed columns. The client cannot store a mismatched line total. After the statement, the parent `subtotal`, `tax`, and `total` are rewritten from the stored lines. An invoice update does the same once any line exists, so a direct edit of those three columns does not stick.
 
 ### `payment_links`
 
@@ -201,7 +201,7 @@ The payload is replaced on the next submit. It is deleted once `create_invoice` 
 | `used_at` | `timestamptz` | |
 | `created_at` | `timestamptz` | |
 
-No policies for `authenticated`. Issue and consume go through security-definer functions.
+No policies and no grants for `authenticated`. `public.issue_email_confirmation` stores the hex SHA-256 hash, and `public.confirm_email` consumes it.
 
 ### `stripe_events`
 
@@ -211,67 +211,77 @@ No policies for `authenticated`. Issue and consume go through security-definer f
 | `event_type` | `text` | |
 | `received_at` | `timestamptz` | |
 
-No policies. The webhook inserts with the secret key. A primary-key conflict means the event was already handled.
+No policies and no grants for `authenticated`. The webhook inserts with the secret key. A primary-key conflict means the event was already handled.
 
 ## Indexes
 
 - `clients (user_id)` and partial `clients (user_id) where archived_at is null`
 - `invoices (user_id, created_at desc)`
 - `invoices (user_id, status, due_date)`
-- `invoice_line_items (invoice_id)`
-- `payment_links (invoice_id)` plus the partial unique active index
-- `invoice_sends (invoice_id, created_at desc)`
+- `invoices (client_id, user_id)`
+- `invoice_line_items (invoice_id, user_id)` and `invoice_line_items (user_id)`
+- `payment_links (invoice_id, user_id)` and `payment_links (user_id)`, plus the partial unique active index
+- `invoice_sends (invoice_id, created_at desc)`, `invoice_sends (invoice_id, user_id)`, and `invoice_sends (user_id)`
 - `email_confirmations (user_id)`
 
-Foreign-key columns are covered by these indexes or by a primary key.
+Composite foreign keys are indexed on the full key, in key order. The extra `user_id` indexes cover the row-level policies. Other foreign-key columns are covered by these indexes or by a primary key.
 
 ## Access
 
 | Table | `authenticated` |
 |---|---|
-| `profiles` | Select and update its own row. Insert is the sign-up trigger |
-| `clients` | Select, insert, update its own rows. No delete |
-| `invoices` | Select, update, delete its own unpaid rows. Insert is `create_invoice` only |
-| `invoice_line_items` | Select, insert, update, and delete its own rows. A trigger rejects changes while the invoice is paid |
-| `payment_links` | Select, insert, and update its own rows |
+| `profiles` | Select its own row. Update only `full_name`, `company_name`, `email`, `address`, `vat_id`, and `website`. Insert is the sign-up trigger |
+| `clients` | Select and insert its own rows. Update the client fields, not `id` or `user_id`. No delete |
+| `invoices` | Select, update, and delete its own unpaid rows. Insert is `create_invoice` only |
+| `invoice_line_items` | Select, insert, and delete its own rows. Update `position`, `description`, `quantity`, `unit`, `unit_price`, and `vat_rate`. A trigger rejects changes while the invoice is paid |
+| `payment_links` | Select and insert its own rows. Update `active` and `deactivated_at` |
 | `invoice_sends` | Select and insert its own rows |
-| `invoice_holds` | Select, insert, update, delete its own row |
+| `invoice_holds` | Select, insert, and delete its own row. Update `payload` |
 | `invoice_counters` | None |
 | `email_confirmations` | None |
 | `stripe_events` | None |
 
-Update policies include both `using` and `with check`, each requiring `(select auth.uid()) = user_id`, so a row cannot be reassigned to another user.
+`authenticated` also has `usage` and `select` on the identity sequences for `clients`, `invoice_line_items`, `payment_links`, and `invoice_sends`. It has no sequence grant for `invoices` or `email_confirmations`, because those inserts go through security-definer functions.
+
+Update policies include both `using` and `with check`, each requiring `(select auth.uid()) = user_id`, so a row cannot be reassigned to another user. On `profiles` the same check uses `id`.
 
 Delete on `invoices` requires `status = 'not_paid'`.
 
-Line-item changes and invoice content changes are rejected by trigger when `paid_via = 'stripe'`. When `paid_via = 'manual'`, the only allowed invoice update clears `status`, `paid_via`, and `paid_at` back to unpaid. Line edits stay closed until that update has committed.
+`private.lock_paid_invoice` rejects line changes and invoice content changes when `paid_via = 'stripe'`. A later update of a Stripe-paid row is rejected. The only transition into `paid_via = 'stripe'` is the webhook: `auth.jwt() ->> 'role'` or `current_user` must be `service_role`, `status` must become `paid`, `paid_at` must be set, and every other column except `updated_at` must stay as it was.
 
-`invoice_number`, `user_id`, and the snapshot columns are unchanged by a normal edit. Changing the selected client is an explicit update of `client_id` and the To snapshot together, done by the server action.
+When `paid_via = 'manual'`, the only allowed invoice update clears `status`, `paid_via`, and `paid_at` back to unpaid. Line changes are rejected while `paid_via` is set. After that unpay update, line changes are allowed.
+
+`id`, `user_id`, `invoice_number`, `created_at`, and the From snapshot are unchanged by every invoice update. Changing the selected client is an explicit update of `client_id` and the To snapshot together, done by the server action.
+
+A direct delete of a paid invoice is rejected. A delete caused by a cascading foreign key is allowed, so deleting the auth user still removes that user's paid invoices. Account deletion is outside this version. The cascade is there so the foreign keys can do their job.
 
 ## Functions and triggers
 
 `private.set_updated_at` runs before update on `profiles`, `clients`, `invoices`, and `invoice_holds`.
 
-`private.handle_new_user` is security definer, `search_path` empty, and is only used as an after-insert trigger on `auth.users`. It inserts `profiles (id)`.
+`private.handle_new_user` is security definer, `search_path` empty, and is only used as an after-insert trigger on `auth.users`. It inserts `profiles (id)` and leaves an existing profile as it is.
 
-`private.next_invoice_number(p_user_id uuid, p_year integer) returns text` is security definer, `search_path` empty. It rejects a `p_user_id` that is not `auth.uid()`. It upserts `invoice_counters` for that user and year, increments `last_number`, and returns `INV-{year}-{number}` padded to three digits. `execute` is revoked from `public`, `anon`, and `authenticated`. `create_invoice` is the only caller.
+`private.next_invoice_number(p_user_id uuid, p_year integer) returns text` is security definer, `search_path` empty. It rejects a `p_user_id` that is not `auth.uid()`. It upserts `invoice_counters` for that user and year, increments `last_number`, and returns `INV-{year}-{number}` padded to three digits. Past 999, the number is not truncated. `execute` is revoked from `public`, `anon`, `authenticated`, and `service_role`. `create_invoice` is the only caller, and it runs as the function owner.
 
-`public.create_invoice(...)` is security definer, `search_path` empty, and `execute` is granted to `authenticated` only. It:
+`public.create_invoice(p_client_id bigint, p_invoice_date date, p_due_date date, p_currency text, p_comments text, p_lines jsonb) returns public.invoices` is security definer, `search_path` empty, and `execute` is granted to `authenticated` only. There is no user id argument. `p_lines` is a JSON array of objects with `description`, `quantity`, `unit`, `unit_price`, and `vat_rate`. Position is the 1-based array order. It:
 
-1. Reads the user from `auth.uid()` and ignores any user id in the arguments.
-2. Copies the caller's profile and the selected client after checking both belong to that user, the profile has a full name or a company name, and the client has an email.
-3. Allocates the number for `extract(year from invoice_date)`.
-4. Inserts the invoice and its lines.
-5. Lets the line trigger compute line totals, then sets `subtotal`, `tax`, and `total` from those lines.
-6. Raises if the total is not greater than zero, or if the due date is before the invoice date.
+1. Reads the user from `auth.uid()` and stops when there is no signed-in user.
+2. Copies the caller's profile and the selected client after checking both belong to that user, the profile has a full name or a company name, and the client email is not blank. The stored To email is trimmed.
+3. Raises when the due date is before the invoice date, when there is not at least one line, or when the computed total is not greater than zero.
+4. Allocates the number for `extract(year from invoice_date)`.
+5. Inserts the invoice and all of its lines in one insert.
+6. Lets `private.set_line_amounts` compute each line, then lets the statement trigger set `subtotal`, `tax`, and `total` from those lines.
+7. Returns the invoice row. A total that is not greater than zero raises again, and the number allocation rolls back with the insert.
 
-Because the number update and the insert share this transaction, a failure rolls both back.
+`private.note_invoice_for_recalc` runs after each line insert, update, or delete and records the affected invoice. `private.recalculate_noted_invoices` runs after the statement, rewrites each affected invoice's totals from its lines, and drops that record. One statement therefore updates the parent once, after every line in the statement is stored.
 
-`private.recalculate_invoice_totals` runs when lines change and rewrites the parent totals.
+`private.lock_paid_invoice` runs before update and delete on invoices, and before insert, update, and delete on lines. It is security invoker with an empty `search_path`. Its payment rules are the ones in the access section above.
 
-`private.lock_paid_invoice` runs before update and delete on invoices, and before line changes. Stripe-paid rows are left as they are. The transition from unpaid to Stripe-paid is allowed, which is the webhook write. A later update is rejected.
+`public.issue_email_confirmation(p_token text, p_expires_at timestamptz)` stores `encode(extensions.digest(p_token, 'sha256'), 'hex')` for `auth.uid()`. The token must be non-empty and the expiry must be in the future. Security definer, `search_path` empty, granted to `authenticated` only.
 
-`public.confirm_email(p_token text)` hashes the token, checks the unused unexpired row for `auth.uid()`, sets `used_at`, and sets `profiles.email_confirmed_at`. Security definer, `search_path` empty, granted to `authenticated` only.
+`public.confirm_email(p_token text)` hashes the token the same way, checks the unused unexpired row for `auth.uid()`, sets `used_at`, and sets `profiles.email_confirmed_at` when it is still empty. A second use of the same token raises. Security definer, `search_path` empty, granted to `authenticated` only.
+
+`execute` on the private trigger functions is revoked from `public`, `anon`, `authenticated`, and `service_role`. The `private` schema itself is revoked from `public`, `anon`, and `authenticated`.
 
 ## Storage
 
@@ -279,7 +289,7 @@ One private bucket, `invoices`.
 
 Object name: `{user_id}/{invoice_id}.pdf`.
 
-Policies on `storage.objects` let `authenticated` select, insert, and update objects in that bucket whose first path folder equals `auth.uid()`. Delete is allowed for the same folder so removing an unpaid invoice can remove its PDF. The bucket has no public read.
+Policies on `storage.objects` let `authenticated` select, insert, update, and delete objects in that bucket whose first path folder equals `(select auth.uid())::text`. The update policy has both `using` and `with check`, so a file cannot be moved into another user's folder. Select, insert, and update together allow replacing a PDF. Delete is allowed for the same folder so removing an unpaid invoice can remove its PDF. The bucket has no public read.
 
 ## Schema
 
@@ -395,7 +405,8 @@ create index invoices_user_created_idx
   on public.invoices (user_id, created_at desc);
 create index invoices_user_status_due_idx
   on public.invoices (user_id, status, due_date);
-create index invoices_client_id_idx on public.invoices (client_id);
+create index invoices_client_id_user_id_idx
+  on public.invoices (client_id, user_id);
 
 create table public.invoice_line_items (
   id bigint generated always as identity primary key,
@@ -424,8 +435,10 @@ create table public.invoice_line_items (
   )
 );
 
-create index invoice_line_items_invoice_id_idx
-  on public.invoice_line_items (invoice_id);
+create index invoice_line_items_invoice_id_user_id_idx
+  on public.invoice_line_items (invoice_id, user_id);
+create index invoice_line_items_user_id_idx
+  on public.invoice_line_items (user_id);
 
 create table public.payment_links (
   id bigint generated always as identity primary key,
@@ -448,7 +461,9 @@ create table public.payment_links (
   )
 );
 
-create index payment_links_invoice_id_idx on public.payment_links (invoice_id);
+create index payment_links_invoice_id_user_id_idx
+  on public.payment_links (invoice_id, user_id);
+create index payment_links_user_id_idx on public.payment_links (user_id);
 create unique index payment_links_one_active_idx
   on public.payment_links (invoice_id)
   where active;
@@ -469,6 +484,9 @@ create table public.invoice_sends (
 
 create index invoice_sends_invoice_id_created_idx
   on public.invoice_sends (invoice_id, created_at desc);
+create index invoice_sends_invoice_id_user_id_idx
+  on public.invoice_sends (invoice_id, user_id);
+create index invoice_sends_user_id_idx on public.invoice_sends (user_id);
 
 create table public.invoice_holds (
   user_id uuid primary key references auth.users (id) on delete cascade,
@@ -496,4 +514,4 @@ create table public.stripe_events (
 );
 ```
 
-RLS, grants, triggers, and the function bodies are applied with the migration that creates these tables. The policies follow the access table above. In particular, invoice insert is revoked from `authenticated`, and `public.create_invoice` is the insert path.
+RLS, column grants, triggers, and the function bodies are applied with the migration that creates these tables. The policies and grants follow the access section above. Invoice insert is revoked from `authenticated`, and `public.create_invoice` is the insert path. `email_confirmed_at` and the Stripe profile columns are not granted to `authenticated`. `confirm_email` and the webhook set them.
