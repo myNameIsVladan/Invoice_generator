@@ -69,5 +69,5 @@ export default async function ConfirmEmailPage({ searchParams }: PageProps) {
     )
   }
 
-  redirect("/invoices")
+  redirect("/profile")
 }
