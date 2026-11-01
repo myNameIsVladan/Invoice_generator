@@ -49,7 +49,7 @@ A paid invoice that was paid through Stripe stays paid, and it stays locked. A p
 | Invoice | Reads one invoice, downloads the PDF, resends it, or changes its status |
 | Clients | Lists clients, including archived ones |
 | Add or edit client | Edits that client's details, or archives and restores the client |
-| Profile | Edits the sender details used as From |
+| Profile | Edits the sender details used as From, and connects Stripe |
 
 Signing in opens the invoice list. A signed-out visitor sees the sign-in screen, with a way to register and a way to reset a password.
 
@@ -69,6 +69,8 @@ Every field can be saved empty. Create stays disabled until the profile has a fu
 From on an invoice is a copy taken when that invoice is created. Changing the profile later leaves existing invoices and their PDFs as they were. From is read-only on the invoice form.
 
 The name shown to the client is the company name when it exists, and the full name otherwise.
+
+The profile also connects Stripe. Connecting is optional until the user sends an invoice. A finished connection lets later sends include a payment link without leaving the invoice. The user can start Connect from the profile or from Send on an invoice.
 
 ## Clients
 
@@ -162,28 +164,24 @@ Create is available only when all of these are true:
 - there is at least one line
 - the total is greater than zero
 
-Submitting creates the invoice and emails the client immediately. There is no saved draft and no separate send step.
+Submitting saves the invoice, stores the PDF, and opens the invoice. It does not email the client and it does not require Stripe.
 
-If the user has not finished Stripe onboarding, the form is kept and the user is taken through Stripe's hosted onboarding. When they return, the app creates and sends the invoice. If they leave onboarding before it is finished, nothing is sent and no invoice number is used. Sender and client details are copied at the moment the invoice is actually created, so a profile or client edit made before that moment is included.
-
-After a successful send, the form clears and shows a success message with a link to the invoice.
-
-If the email fails, the invoice still exists as unpaid, the payment link still works, and the screen shows Send failed. The user can retry from that screen or from the invoice.
+Sender and client details are copied when the invoice is saved.
 
 ## Invoice number
 
 The number is assigned by the app. The user cannot type it or change it later.
 
-The format is `INV-2026-001`. The year comes from the invoice date at creation. Each user has their own sequence, and the sequence starts again at 001 each calendar year. Editing the date later does not change the number.
+The format is `INV-2026-11-01-00000042`. The year, month, and day come from the invoice date at creation. The id is the invoice id, zero-padded to eight digits so text sort matches numeric sort. Editing the date later does not change the number.
 
 ## Invoice detail
 
-The detail screen shows the same invoice the client received, plus the current payment link and the send state.
+The detail screen shows the saved invoice, plus the current payment link when one exists, and the send state.
 
 The user can:
 
 - download the PDF
-- resend the email
+- send the email, or resend it after a previous attempt
 - mark an unpaid invoice as paid
 - set a manually paid invoice back to unpaid
 - edit an unpaid invoice
@@ -199,7 +197,7 @@ Changing the total, the currency, or the client deactivates the current payment 
 
 Changing the invoice date, the due date, or the comments keeps the current payment link.
 
-Both kinds of edit ask, in a dialog, whether to resend the invoice. The dialog includes the same optional personal note. The invoice is saved either way.
+Both kinds of edit ask, in a dialog, whether to send the invoice. The dialog includes the same optional personal note. The invoice is saved either way. The first send says Send. A later send says Resend.
 
 If the user declines the resend after a date or comment change, the client's existing link still pays the same total. The PDF they already have is the previous one. The PDF in the app is the updated one.
 
@@ -211,7 +209,9 @@ Resend from the list or the invoice uses the current PDF and the current link, a
 
 Each invoice has one active Stripe payment link for its exact total, in its currency. The client pays the freelancer's own Stripe account. The app does not take a fee. Stripe's processing fee is paid by the freelancer's Stripe account.
 
-The link is created when the invoice is created. Replacing a link deactivates the previous one. An invoice has only one active link at a time.
+The link is created when the invoice is sent, or when a hand-marked invoice is set back to unpaid. Replacing a link deactivates the previous one. An invoice has only one active link at a time. A saved invoice that has not been sent has no payment link yet.
+
+If Stripe charges are not enabled, Send and Resend open Stripe-hosted onboarding. When the user returns with charges enabled, the app sends that invoice. Leaving onboarding early leaves the invoice saved and unsent. The user can also connect Stripe from the profile before sending.
 
 A successful Stripe payment marks the invoice paid. The user cannot set that invoice back to unpaid, edit it, or delete it.
 
@@ -225,7 +225,7 @@ The email comes from the app. A reply goes to the profile email. When the profil
 
 The subject is fixed:
 
-`Invoice INV-2026-001 from Northwind Studio`
+`Invoice INV-2026-11-01-00000042 from Northwind Studio`
 
 The sender name in the subject is the company name, or the full name when there is no company name.
 
@@ -234,7 +234,7 @@ The body is fixed, with the personal note included only when the user wrote one:
 ```
 Hello,
 
-Please find invoice INV-2026-001 attached.
+Please find invoice INV-2026-11-01-00000042 attached.
 
 <personal note>
 
@@ -245,7 +245,7 @@ Thank you,
 Northwind Studio
 ```
 
-The PDF is attached. The file name is the invoice number, for example `INV-2026-001.pdf`.
+The PDF is attached. The file name starts with the invoice date, then the invoice id padded to 8 digits, then the invoice number, so files sort by date. For invoice 42 dated 1 Nov 2026 the file is `2026-11-01_00000042_INV-2026-11-01-00000042.pdf`.
 
 A failed send can be retried. Retry uses the current PDF and the active payment link, and offers the optional note again.
 
@@ -268,8 +268,9 @@ Amounts are written as `1,234.56 EUR`, with a thousands comma, a decimal point, 
 
 | Situation | Status | Can edit or delete | Payment link |
 |---|---|---|---|
-| Created, client has not paid | Not paid | Yes | Active |
-| Email failed after create | Not paid, send failed | Yes | Active |
+| Saved, not sent | Not paid | Yes | None until send |
+| Sent, client has not paid | Not paid, sent | Yes | Active |
+| Email failed | Not paid, send failed | Yes | Active when the link was created |
 | Due date has passed and the client has not paid | Not paid, Overdue badge | Yes | Active |
 | Client paid through Stripe | Paid | No | Deactivated |
 | User marked it paid | Paid | No, until it is set back to unpaid | Deactivated |

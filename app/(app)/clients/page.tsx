@@ -59,8 +59,7 @@ export default async function ClientsPage({ searchParams }: PageProps) {
         <div className="max-w-2xl space-y-2">
           <h1 className="text-2xl font-semibold tracking-tight">Clients</h1>
           <p className="text-sm text-pretty text-muted-foreground">
-            Keep who you invoice on file — all fields are optional — so
-            you&apos;re ready when invoice creation launches.
+            Keep who you invoice on file. Every field can stay empty until you are ready to bill them.
           </p>
         </div>
         {hasAnyClients ? (

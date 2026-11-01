@@ -1,5 +1,8 @@
 "use client"
 
+import Link from "next/link"
+import { SettingsIcon } from "lucide-react"
+
 import { signOutAction } from "@/app/actions/sign-out"
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
 import { Button } from "@/components/ui/button"
@@ -7,6 +10,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuGroup,
+  DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
@@ -66,6 +70,11 @@ export function AppAccountMenu({
             )}
           </DropdownMenuLabel>
         </DropdownMenuGroup>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem render={<Link href="/profile" />}>
+          <SettingsIcon />
+          Settings
+        </DropdownMenuItem>
         <DropdownMenuSeparator />
         <form action={signOutAction}>
           <Button

@@ -15,6 +15,9 @@ const publicRoutes = new Set([
   "/reset-password",
   "/auth/confirm",
   "/auth/callback",
+  "/api/stripe/webhook",
+  "/pay/success",
+  "/pay/cancelled",
 ]);
 
 function isPublicPath(pathname: string) {

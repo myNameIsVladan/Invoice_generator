@@ -72,7 +72,7 @@ There is no delete policy. The picker reads rows where `archived_at` is null and
 
 ### `invoice_counters`
 
-One row per user per calendar year. The year is the invoice date's year. `authenticated` has no grants on this table. Only `private.next_invoice_number` updates it.
+Legacy table from the earlier per-year sequence format (`INV-YYYY-001`). New invoices use `INV-YYYY-MM-DD-{id}` and do not read or write this table. It may still exist in the database until a later cleanup migration removes it and `private.next_invoice_number`.
 
 | Column | Type | Notes |
 |---|---|---|
@@ -91,7 +91,7 @@ The From and To columns are the copy taken at creation. They are what the PDF an
 | `id` | `bigint` identity pk | |
 | `user_id` | `uuid` | Owner |
 | `client_id` | `bigint` | Source client. Remains set after the client is archived |
-| `invoice_number` | `text` | `INV-2026-001`. Immutable |
+| `invoice_number` | `text` | `INV-2026-11-01-00000042`. Immutable |
 | `invoice_date` | `date` | |
 | `due_date` | `date` | Must be on or after `invoice_date` |
 | `currency` | `text` | `EUR`, `USD`, or `GBP` |
@@ -179,16 +179,16 @@ One row per send attempt, including the first send, a retry, and a resend.
 
 ### `invoice_holds`
 
-At most one unfinished submission per user, used while Stripe onboarding is in progress. This is not an invoice and does not consume a number.
+At most one Stripe onboarding intent per user. This is not an invoice and does not consume a number.
 
 | Column | Type | Notes |
 |---|---|---|
 | `user_id` | `uuid` pk | |
-| `payload` | `jsonb` | Dates, currency, `client_id`, comments, note, and lines |
+| `payload` | `jsonb` | `{ "intent": "profile" }` or `{ "intent": "send", "invoice_id", "note" }` |
 | `created_at` | `timestamptz` | |
 | `updated_at` | `timestamptz` | |
 
-The payload is replaced on the next submit. It is deleted once `create_invoice` succeeds. From and To are not stored here. They are read from the profile and the client when the invoice is created.
+The payload is replaced when the user starts Connect again. A profile intent is deleted when onboarding returns. A send intent is deleted after that invoice is emailed. Leaving onboarding early keeps the saved invoice.
 
 ### `email_confirmations`
 
@@ -261,17 +261,19 @@ A direct delete of a paid invoice is rejected. A delete caused by a cascading fo
 
 `private.handle_new_user` is security definer, `search_path` empty, and is only used as an after-insert trigger on `auth.users`. It inserts `profiles (id)` and leaves an existing profile as it is.
 
-`private.next_invoice_number(p_user_id uuid, p_year integer) returns text` is security definer, `search_path` empty. It rejects a `p_user_id` that is not `auth.uid()`. It upserts `invoice_counters` for that user and year, increments `last_number`, and returns `INV-{year}-{number}` padded to three digits. Past 999, the number is not truncated. `execute` is revoked from `public`, `anon`, `authenticated`, and `service_role`. `create_invoice` is the only caller, and it runs as the function owner.
+`private.next_invoice_number(p_user_id uuid, p_year integer) returns text` is legacy. It is no longer called by `create_invoice`.
 
 `public.create_invoice(p_client_id bigint, p_invoice_date date, p_due_date date, p_currency text, p_comments text, p_lines jsonb) returns public.invoices` is security definer, `search_path` empty, and `execute` is granted to `authenticated` only. There is no user id argument. `p_lines` is a JSON array of objects with `description`, `quantity`, `unit`, `unit_price`, and `vat_rate`. Position is the 1-based array order. It:
 
 1. Reads the user from `auth.uid()` and stops when there is no signed-in user.
 2. Copies the caller's profile and the selected client after checking both belong to that user, the profile has a full name or a company name, and the client email is not blank. The stored To email is trimmed.
 3. Raises when the due date is before the invoice date, when there is not at least one line, or when the computed total is not greater than zero.
-4. Allocates the number for `extract(year from invoice_date)`.
-5. Inserts the invoice and all of its lines in one insert.
+4. Inserts the invoice with a temporary `invoice_number`, then sets `invoice_number` to `INV-YYYY-MM-DD-{id}` using the invoice date and the new row id, zero-padded to eight digits.
+5. Inserts all line items in the same transaction.
 6. Lets `private.set_line_amounts` compute each line, then lets the statement trigger set `subtotal`, `tax`, and `total` from those lines.
-7. Returns the invoice row. A total that is not greater than zero raises again, and the number allocation rolls back with the insert.
+7. Returns the invoice row. A total that is not greater than zero raises again, and the insert rolls back.
+
+`public.release_failed_invoice(p_invoice_id bigint) returns void` is security definer, `search_path` empty, and `execute` is granted to `authenticated` only. There is no user id argument. It locks the caller's unpaid invoice and deletes that row. A paid invoice, or an invoice owned by someone else, raises. The stored PDF is removed by the server action, not by this function.
 
 `private.note_invoice_for_recalc` runs after each line insert, update, or delete and records the affected invoice. `private.recalculate_noted_invoices` runs after the statement, rewrites each affected invoice's totals from its lines, and drops that record. One statement therefore updates the parent once, after every line in the statement is stored.
 
@@ -287,7 +289,9 @@ A direct delete of a paid invoice is rejected. A delete caused by a cascading fo
 
 One private bucket, `invoices`.
 
-Object name: `{user_id}/{invoice_id}.pdf`.
+Object name: `{user_id}/{year}/{month}/{day}/{invoice_id}/{year}-{month}-{day}_{invoice_id}_{invoice_number}.pdf`.
+
+The invoice id is zero-padded to 8 digits. Year, month, and day are the invoice date, zero-padded. Example: `{user_id}/2026/11/01/00000042/2026-11-01_00000042_INV-2026-11-01-00000042.pdf`. The attachment and download name are the basename. `pdf_path` stores this key. The first folder remains the user id, which is what the storage policies check.
 
 Policies on `storage.objects` let `authenticated` select, insert, update, and delete objects in that bucket whose first path folder equals `(select auth.uid())::text`. The update policy has both `using` and `with check`, so a file cannot be moved into another user's folder. Select, insert, and update together allow replacing a PDF. Delete is allowed for the same folder so removing an unpaid invoice can remove its PDF. The bucket has no public read.
 

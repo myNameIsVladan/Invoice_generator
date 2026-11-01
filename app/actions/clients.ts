@@ -79,6 +79,54 @@ export async function createClientAction(
   redirect(`/clients/${data.id}`)
 }
 
+const inlineClientSchema = clientFormSchema.superRefine((value, ctx) => {
+  if (value.email.trim() === "") {
+    ctx.addIssue({
+      code: "custom",
+      path: ["email"],
+      message: "Enter an email address",
+    })
+  }
+})
+
+export async function createClientInlineAction(
+  _prev: ClientActionState,
+  formData: FormData
+): Promise<ClientActionState & { clientId?: number }> {
+  const parsed = inlineClientSchema.safeParse({
+    full_name: formData.get("full_name"),
+    company_name: formData.get("company_name"),
+    email: formData.get("email"),
+    address: formData.get("address"),
+    vat_id: formData.get("vat_id"),
+  })
+
+  if (!parsed.success) {
+    return { fieldErrors: parsed.error.flatten().fieldErrors }
+  }
+
+  const { supabase, user } = await requireUser()
+  if (!user) {
+    return { error: "Sign in to add a client." }
+  }
+
+  const { data, error } = await supabase
+    .from("clients")
+    .insert({
+      user_id: user.id,
+      ...clientFormToDatabase(parsed.data),
+    })
+    .select("id")
+    .single()
+
+  if (error || !data) {
+    return { error: error?.message ?? "The client could not be saved." }
+  }
+
+  revalidatePath("/clients", "layout")
+  return { success: "Client added.", clientId: data.id }
+}
+
 export async function updateClientAction(
   _prev: ClientActionState,
   formData: FormData

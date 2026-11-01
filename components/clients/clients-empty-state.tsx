@@ -13,7 +13,7 @@ type ClientsEmptyStateProps = {
 
 export function ClientsEmptyState({
   title = "No clients yet",
-  description = "Create a client record so you can bill them once invoice creation ships.",
+  description = "Add a client when you want them available on an invoice.",
   actionHref = "/clients/new",
   actionLabel = "Add client",
 }: ClientsEmptyStateProps) {

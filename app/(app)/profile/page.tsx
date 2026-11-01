@@ -3,13 +3,25 @@ import { connection } from "next/server"
 import { redirect } from "next/navigation"
 
 import { ProfileForm } from "@/components/profile/profile-form"
+import { StripeConnect } from "@/components/profile/stripe-connect"
 import { FormAlert } from "@/components/auth/form-alert"
 import { profileRowToFormValues } from "@/lib/profile/schema"
 import { createClient } from "@/utils/supabase/server"
 
 export const instant = false
 
-export default async function ProfilePage() {
+type PageProps = {
+  searchParams: Promise<{
+    stripe?: string | string[]
+    message?: string | string[]
+  }>
+}
+
+function first(value: string | string[] | undefined) {
+  return Array.isArray(value) ? value[0] : value
+}
+
+export default async function ProfilePage({ searchParams }: PageProps) {
   await connection()
   const cookieStore = await cookies()
   const supabase = createClient(cookieStore)
@@ -22,9 +34,13 @@ export default async function ProfilePage() {
     redirect("/login")
   }
 
+  const query = await searchParams
+  const stripe = first(query.stripe)
   const { data: profile } = await supabase
     .from("profiles")
-    .select("full_name, company_name, email, address, vat_id, website")
+    .select(
+      "full_name, company_name, email, address, vat_id, website, stripe_charges_enabled"
+    )
     .eq("id", user.id)
     .maybeSingle()
 
@@ -43,10 +59,20 @@ export default async function ProfilePage() {
           keeps happening, contact support.
         </FormAlert>
       ) : (
-        <ProfileForm
-          accountEmail={user.email}
-          defaultValues={profileRowToFormValues(profile, user.email)}
-        />
+        <>
+          <StripeConnect
+            chargesEnabled={Boolean(profile.stripe_charges_enabled)}
+            notice={
+              stripe === "ready" || stripe === "incomplete" || stripe === "error"
+                ? stripe
+                : null
+            }
+          />
+          <ProfileForm
+            accountEmail={user.email}
+            defaultValues={profileRowToFormValues(profile, user.email)}
+          />
+        </>
       )}
     </div>
   )

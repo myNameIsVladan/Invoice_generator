@@ -38,6 +38,7 @@ utils/supabase/                  existing browser, server, and middleware client
 utils/email/send.ts              existing Resend helper
 lib/invoice/calculate.ts         shared line and invoice math
 lib/invoice/format.ts            shared 1,234.56 EUR formatting
+lib/invoice/filename.ts          sortable PDF path and attachment name
 lib/invoice/pdf.tsx              PDF document
 ```
 
@@ -71,23 +72,29 @@ Two operations need a privileged path:
 
 Every other write uses the user session. The secret key is never referenced from a client component or a `NEXT_PUBLIC_` variable.
 
-## Create, hold, and send
+## Save, then send
 
-Create is one server action.
+Saving an invoice and sending it are separate server actions.
+
+Save:
 
 1. Load the user and the profile. Stop when the email is unconfirmed, or when both sender names are empty.
 2. Validate the payload with zod: client belongs to the user, client has an email, dates, currency, at least one line, and a total above zero. Totals are computed in `lib/invoice/calculate.ts`. The same function is used by the live preview and the PDF, so the three never disagree.
-3. Load the connected account. When `stripe_charges_enabled` is false, upsert `invoice_holds` for this user with the form payload, create a Stripe Account Link, and redirect to it. The hold is not an invoice and has no number.
-4. On return, the return route checks the account. When charges are enabled, it runs this same action with the stored hold and then deletes the hold. Leaving onboarding early leaves the hold unused. The next submit replaces it.
-5. Call `create_invoice`. That function, in one transaction, locks the user's counter for the invoice-date year, assigns `INV-YYYY-001`, copies From and To, and inserts the lines. It stores the computed subtotal, tax, and total. A rolled-back failure gives the number back.
-6. Create a Checkout Session on the connected account (see Stripe below) and insert the active `payment_links` row.
-7. Render the PDF, upload it to the private `invoices` bucket at `{user_id}/{invoice_id}.pdf`, and store that path.
-8. Send the email with the existing Resend helper. The attachment is the PDF. `replyTo` is the profile email, or the account email when the profile email is empty. Record the attempt in `invoice_sends`.
-9. On Resend success, set the invoice send state to sent. On failure, set it to failed, keep the invoice and the payment link, and return the invoice id so the form can show Send failed and a link to the invoice.
+3. Call `create_invoice`. That function, in one transaction, inserts the invoice, assigns `INV-YYYY-MM-DD-{id}` from the invoice date and the new row id, copies From and To, and inserts the lines. It stores the computed subtotal, tax, and total. A rolled-back failure deletes the row through `release_failed_invoice`.
+4. Render the PDF, upload it to the private `invoices` bucket, and store that path. The object key is `{user_id}/{year}/{month}/{day}/{invoice_id}/{year}-{month}-{day}_{invoice_id}_{invoice_number}.pdf`. The invoice id is padded to 8 digits. Year, month, and day come from the invoice date. The email attachment and the download use the basename, for example `2026-11-01_00000042_INV-2026-11-01-00000042.pdf`. An edit that changes the invoice date writes the new path and deletes the previous object.
+5. Redirect to the invoice. Stripe is not called.
 
-The form clears only after a successful send. A second click cannot create another invoice. If step 6 or 7 fails after the row exists, the action deletes that unpaid invoice, which returns its number only when the delete runs in a compensating transaction that also decrements the counter. The user sees an error and can submit again. An email failure does not delete the invoice.
+If the PDF step fails after the row exists, the action calls `release_failed_invoice`. That function deletes the unpaid invoice row.
 
-From and To copies are taken inside `create_invoice`, after onboarding returns, so they match the profile and client at send time.
+Send, from the invoice or the list:
+
+1. When `stripe_charges_enabled` is false, store a send intent in `invoice_holds` (`intent`, invoice id, and the optional note), create a Stripe Account Link, and redirect to it. The invoice already has a number.
+2. On return, the return route refreshes `stripe_charges_enabled`. When charges are enabled and the hold is a send intent, it sends that invoice and deletes the hold. Leaving onboarding early leaves the invoice saved. A profile connect stores `intent: profile` and returns to the profile.
+3. Create a Checkout Session when the invoice has no active payment link.
+4. Replace the stored PDF, then send the email with the existing Resend helper. The attachment is the PDF. `replyTo` is the profile email, or the account email when the profile email is empty. Record the attempt in `invoice_sends`.
+5. On success, set the invoice send state to sent. On failure, set it to failed, keep the invoice and the payment link, and show Send failed on the invoice.
+
+From and To copies are taken inside `create_invoice` when the invoice is saved.
 
 ## Edit, resend, status, delete
 
@@ -95,7 +102,8 @@ Edits of an unpaid invoice recompute totals in the server action and update the 
 
 The action then:
 
-- expires the Stripe Checkout Session and deactivates its `payment_links` row when the total, currency, or client changed, and creates a new session
+- expires the Stripe Checkout Session and deactivates its `payment_links` row when the total, currency, or client changed and a link already exists, and creates a new session
+- leaves the invoice without a link when it has not been sent yet
 - leaves the active link in place when only the dates or comments changed
 - regenerates and replaces the stored PDF in both cases
 - returns to the page, which opens the resend dialog
@@ -157,7 +165,7 @@ The invoice list is a shadcn table with search, a status filter, and pagination 
 
 The create form uses shadcn form validation. The preview updates from the form values. Inline client creation is a dialog that inserts a client, then selects it.
 
-After a successful send the form resets and a toast links to the new invoice. Send failed keeps a link to the saved invoice and a retry action.
+Saving opens the invoice. Sending from that page emails the client. Send failed stays on the invoice and can be retried.
 
 ## Environment
 
@@ -181,21 +189,22 @@ sequenceDiagram
   participant DB as Postgres
   participant Stripe
   participant Resend
-  User->>Action: Submit invoice
-  alt Stripe onboarding is incomplete
-    Action->>DB: Save invoice hold
+  User->>Action: Save invoice
+  Action->>DB: create_invoice and PDF path
+  Action-->>User: Invoice detail
+  User->>Action: Send
+  alt Stripe charges are not enabled
+    Action->>DB: Save send intent
     Action->>Stripe: Account Link
     Stripe-->>User: Hosted onboarding
     User->>Action: Return
   end
-  Action->>DB: create_invoice
   Action->>Stripe: Checkout Session on connected account
-  Action->>DB: Store payment link and PDF path
   Action->>Resend: Email PDF and link
   alt Resend accepts the email
-    Action-->>User: Cleared form and link to the invoice
+    Action-->>User: Invoice marked sent
   else Resend fails
     Action->>DB: Mark send failed
-    Action-->>User: Link to the unpaid invoice and Retry
+    Action-->>User: Invoice stays unpaid, with Retry
   end
 ```
