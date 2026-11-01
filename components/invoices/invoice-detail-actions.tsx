@@ -37,6 +37,18 @@ import {
 
 const initialState: InvoiceActionState = {}
 
+const PAYMENT_URL_PREVIEW_LEN = 56
+
+function paymentUrlDisplay(url: string, expanded: boolean) {
+  if (expanded || url.length <= PAYMENT_URL_PREVIEW_LEN) {
+    return { text: url, canToggle: url.length > PAYMENT_URL_PREVIEW_LEN }
+  }
+  return {
+    text: `${url.slice(0, PAYMENT_URL_PREVIEW_LEN)}…`,
+    canToggle: true,
+  }
+}
+
 export function InvoiceDetailActions({
   invoiceId,
   invoiceNumber,
@@ -67,6 +79,7 @@ export function InvoiceDetailActions({
   const [paidOpen, setPaidOpen] = useState(false)
   const [unpaidOpen, setUnpaidOpen] = useState(false)
   const [deleteOpen, setDeleteOpen] = useState(false)
+  const [paymentLinkExpanded, setPaymentLinkExpanded] = useState(false)
   const [paidState, paidAction, paidPending] = useActionState(markInvoicePaidAction, initialState)
   const [unpaidState, unpaidAction, unpaidPending] = useActionState(
     markInvoiceUnpaidAction,
@@ -149,7 +162,14 @@ export function InvoiceDetailActions({
         {paidVia === "stripe" ? <Badge variant="secondary">Paid through Stripe</Badge> : null}
         {paidVia === "manual" ? <Badge variant="secondary">Marked paid</Badge> : null}
         {sendStatus === "failed" ? <Badge variant="destructive">Send failed</Badge> : null}
-        {sendStatus === "sent" ? <Badge variant="outline">Sent</Badge> : null}
+        {sendStatus === "sent" ? (
+          <Badge
+            variant="outline"
+            className="h-auto px-3 py-1.5 text-sm font-medium text-foreground"
+          >
+            Sent
+          </Badge>
+        ) : null}
       </div>
 
       {stripeNotice ? (
@@ -167,16 +187,29 @@ export function InvoiceDetailActions({
       ) : null}
 
       {paymentUrl && status === "not_paid" ? (
-        <p className="text-sm">
-          Payment link:{" "}
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
+          <span className="shrink-0 text-muted-foreground">Payment link:</span>
           <a
             href={paymentUrl}
-            className="inline-flex items-start gap-1.5 break-all underline underline-offset-3"
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex min-w-0 max-w-full items-center gap-1.5 font-mono text-xs leading-none text-foreground underline underline-offset-3"
           >
-            <ExternalLinkIcon className="mt-0.5 size-4 shrink-0" />
-            {paymentUrl}
+            <ExternalLinkIcon className="size-3.5 shrink-0" aria-hidden />
+            <span className={cn("leading-normal", paymentLinkExpanded && "break-all")}>
+              {paymentUrlDisplay(paymentUrl, paymentLinkExpanded).text}
+            </span>
           </a>
-        </p>
+          {paymentUrlDisplay(paymentUrl, paymentLinkExpanded).canToggle ? (
+            <button
+              type="button"
+              className="shrink-0 text-sm leading-none text-foreground underline underline-offset-3"
+              onClick={() => setPaymentLinkExpanded((value) => !value)}
+            >
+              {paymentLinkExpanded ? "See less" : "See more"}
+            </button>
+          ) : null}
+        </div>
       ) : null}
 
       <div className="flex flex-wrap gap-2">

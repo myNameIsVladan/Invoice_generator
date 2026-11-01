@@ -3,7 +3,7 @@ import { redirect } from "next/navigation"
 
 import { loadProfile } from "@/lib/invoice/data"
 import { sendInvoice } from "@/lib/invoice/service"
-import { getAppUrl, getStripe } from "@/lib/stripe/server"
+import { connectedAccountChargesEnabled, getAppUrl } from "@/lib/stripe/server"
 import { createAdminClient } from "@/utils/supabase/admin"
 import { createClient } from "@/utils/supabase/server"
 
@@ -35,11 +35,11 @@ export async function GET() {
     redirect("/profile?stripe=incomplete")
   }
 
-  const account = await getStripe().accounts.retrieve(profile.stripe_account_id)
+  const chargesEnabled = await connectedAccountChargesEnabled(profile.stripe_account_id)
   const admin = createAdminClient()
   const { error: profileError } = await admin
     .from("profiles")
-    .update({ stripe_charges_enabled: Boolean(account.charges_enabled) })
+    .update({ stripe_charges_enabled: chargesEnabled })
     .eq("id", user.id)
 
   if (profileError) {
@@ -60,7 +60,7 @@ export async function GET() {
     typeof payload.invoice_id === "number" &&
     payload.invoice_id > 0
 
-  if (!account.charges_enabled) {
+  if (!chargesEnabled) {
     if (sending && payload?.invoice_id) {
       redirect(`/invoices/${payload.invoice_id}?stripe=incomplete`)
     }

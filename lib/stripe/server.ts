@@ -36,27 +36,84 @@ export async function getAppUrl() {
   return `${proto}://${host}`
 }
 
-export async function createExpressAccount(email: string, userId: string) {
+/** ISO 3166-1 alpha-2. Profiles have no country column, so Connect uses this. */
+export const DEFAULT_CONNECTED_ACCOUNT_COUNTRY = "US"
+
+const CONNECT_API_VERSION = "2026-10-28.preview"
+
+function connectedAccountCountry(country: string | null | undefined) {
+  const code = country?.trim().toUpperCase()
+  if (code && /^[A-Z]{2}$/.test(code)) {
+    return code
+  }
+  return DEFAULT_CONNECTED_ACCOUNT_COUNTRY
+}
+
+export async function createExpressAccount(
+  email: string,
+  userId: string,
+  country?: string | null
+) {
   const stripe = getStripe()
-  return stripe.accounts.create({
-    type: "express",
-    email,
-    capabilities: {
-      card_payments: { requested: true },
-      transfers: { requested: true },
+  return stripe.v2.core.accounts.create(
+    {
+      contact_email: email,
+      dashboard: "express",
+      identity: {
+        country: connectedAccountCountry(country),
+      },
+      defaults: {
+        responsibilities: {
+          fees_collector: "stripe",
+          losses_collector: "stripe",
+        },
+      },
+      configuration: {
+        merchant: {
+          capabilities: {
+            card_payments: { requested: true },
+          },
+        },
+      },
+      metadata: { user_id: userId },
     },
-    metadata: { user_id: userId },
-  })
+    { apiVersion: CONNECT_API_VERSION }
+  )
 }
 
 export async function createOnboardingLink(accountId: string, appUrl: string) {
   const stripe = getStripe()
-  return stripe.accountLinks.create({
-    account: accountId,
-    refresh_url: `${appUrl}/settings/stripe/refresh`,
-    return_url: `${appUrl}/settings/stripe/return`,
-    type: "account_onboarding",
-  })
+  return stripe.v2.core.accountLinks.create(
+    {
+      account: accountId,
+      use_case: {
+        type: "account_onboarding",
+        account_onboarding: {
+          refresh_url: `${appUrl}/settings/stripe/refresh`,
+          return_url: `${appUrl}/settings/stripe/return`,
+        },
+      },
+    },
+    { apiVersion: CONNECT_API_VERSION }
+  )
+}
+
+export async function connectedAccountChargesEnabled(accountId: string) {
+  const stripe = getStripe()
+  try {
+    const account = await stripe.v2.core.accounts.retrieve(
+      accountId,
+      { include: ["configuration.merchant"] },
+      { apiVersion: CONNECT_API_VERSION }
+    )
+    return (
+      account.configuration?.merchant?.capabilities?.card_payments?.status ===
+      "active"
+    )
+  } catch {
+    const account = await stripe.accounts.retrieve(accountId)
+    return Boolean(account.charges_enabled)
+  }
 }
 
 export async function createInvoiceCheckout(input: {

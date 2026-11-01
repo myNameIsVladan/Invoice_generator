@@ -118,7 +118,7 @@ A Stripe-paid invoice cannot take any of these paths. The database trigger is th
 
 ## Stripe
 
-The platform has one Stripe account. Each freelancer has a Connect Express account. The user completes Stripe-hosted onboarding through an Account Link. Return and refresh URLs land on the app routes above. The refresh route issues a new Account Link when the previous one has expired.
+The platform has one Stripe account. Each freelancer has a Connect account created with Accounts v2: Express dashboard, merchant card payments, and Managed Risk (`fees_collector` and `losses_collector` are `stripe`). There is no country on the profile, so `identity.country` is `US`. The user completes Stripe-hosted onboarding through an Accounts v2 Account Link. Return and refresh URLs land on the app routes above. The refresh route issues a new Account Link when the previous one has expired. `stripe_charges_enabled` is true when the merchant `card_payments` capability is `active`.
 
 Charges are direct charges on the connected account:
 

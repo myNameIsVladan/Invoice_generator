@@ -2,7 +2,7 @@ import { NextResponse } from "next/server"
 import type Stripe from "stripe"
 
 import { createAdminClient } from "@/utils/supabase/admin"
-import { getStripe } from "@/lib/stripe/server"
+import { connectedAccountChargesEnabled, getStripe } from "@/lib/stripe/server"
 
 export async function POST(request: Request) {
   const secret = process.env.STRIPE_WEBHOOK_SECRET
@@ -52,9 +52,10 @@ async function handleStripeEvent(event: Stripe.Event) {
 
   if (event.type === "account.updated") {
     const account = event.data.object as Stripe.Account
+    const chargesEnabled = await connectedAccountChargesEnabled(account.id)
     const { error } = await admin
       .from("profiles")
-      .update({ stripe_charges_enabled: Boolean(account.charges_enabled) })
+      .update({ stripe_charges_enabled: chargesEnabled })
       .eq("stripe_account_id", account.id)
     if (error) {
       throw new Error(error.message)
